@@ -1,0 +1,24 @@
+name: tg-monitor
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут
+  workflow_dispatch: {}     # запуск вручную из Actions
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run monitor
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          STRING_SESSION: ${{ secrets.STRING_SESSION }}
+          KEYWORDS: ${{ secrets.KEYWORDS }}
+          NEGATIVE: ${{ secrets.NEGATIVE }}
+          ONLY_PUBLIC: ${{ secrets.ONLY_PUBLIC }}
+        run: python main.py
