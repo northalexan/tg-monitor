@@ -1,19 +1,31 @@
-name: tg-monitor
+name: Telegram Monitor (Telethon + StringSession)
+
 on:
+  # автозапуск каждые 6 часов
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут
-  workflow_dispatch: {}     # запуск вручную из Actions
+    - cron: "0 */6 * * *"
+  # ручной запуск из вкладки Actions
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 360   # максимум GitHub = 360 (6 часов)
+
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - name: Run monitor
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install telethon requests
+
+      - name: Run monitor (5h 50m)
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
@@ -21,4 +33,94 @@ jobs:
           KEYWORDS: ${{ secrets.KEYWORDS }}
           NEGATIVE: ${{ secrets.NEGATIVE }}
           ONLY_PUBLIC: ${{ secrets.ONLY_PUBLIC }}
-        run: python main.py
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          python - << 'PY'
+          import os, re, time, requests
+          from datetime import datetime, timedelta
+          from telethon import events
+          from telethon.sync import TelegramClient
+          from telethon.sessions import StringSession
+
+          API_ID = int(os.environ['API_ID'])
+          API_HASH = os.environ['API_HASH']
+          STRING = os.environ['STRING_SESSION']
+
+          KEYWORDS = os.environ.get('KEYWORDS','').strip()
+          NEGATIVE = os.environ.get('NEGATIVE','').strip()
+          ONLY_PUBLIC = os.environ.get('ONLY_PUBLIC','false').lower() == 'true'
+          WEBHOOK = os.environ.get('WEBHOOK_URL','').strip()
+
+          kw_re  = re.compile(KEYWORDS,  re.IGNORECASE) if KEYWORDS else None
+          neg_re = re.compile(NEGATIVE, re.IGNORECASE)  if NEGATIVE else None
+
+          client = TelegramClient(StringSession(STRING), API_ID, API_HASH)
+
+          def fits(text:str)->bool:
+              if not text: return False
+              if kw_re and not kw_re.search(text): return False
+              if neg_re and    neg_re.search(text): return False
+              return True
+
+          async def notify(event):
+              m = event.message
+              chat = await event.get_chat()
+              chat_title = getattr(chat, "title", None) or getattr(chat, "username", None) or str(m.chat_id)
+              sender = None
+              try:
+                  s = await event.get_sender()
+                  sender = getattr(s, "first_name", None) or getattr(s, "username", None)
+              except: pass
+
+              link = f"https://t.me/{chat.username}/{m.id}" if getattr(chat, "username", None) else None
+              text = m.message or ""
+              msg = (
+                  "🛰 Найдена публикация\n"
+                  f"Чат: {chat_title}\n"
+                  f"Автор: {sender or '—'}\n"
+                  f"UTC: {datetime.utcnow().isoformat(timespec='seconds')}Z\n"
+                  + (f"Ссылка: {link}\n" if link else "")
+                  + "—\n" + text[:1500]
+              )
+              await client.send_message("me", msg)
+
+              if WEBHOOK:
+                  try:
+                      requests.post(WEBHOOK, json={
+                          "chat": chat_title, "sender": sender, "link": link,
+                          "text": text, "utc": datetime.utcnow().isoformat(timespec='seconds')+"Z"
+                      }, timeout=5)
+                  except: pass
+
+          @client.on(events.NewMessage(incoming=True))
+          async def handler(event):
+              if ONLY_PUBLIC:
+                  try:
+                      chat = await event.get_chat()
+                      if not getattr(chat, "username", None):
+                          return
+                  except: 
+                      return
+              if fits(event.message.message or ""):
+                  await notify(event)
+
+          async def main():
+              await client.connect()
+              me = await client.get_me()
+              print("Monitor started as:", getattr(me,'username',None) or me.id, flush=True)
+
+              # Работаем ~5ч50м (чуть меньше 6h лимита)
+              stop_at = datetime.utcnow() + timedelta(hours=5, minutes=50)
+              while datetime.utcnow() < stop_at:
+                  await client.run_until_disconnected()
+                  # если внезапно отключился — переподключимся
+                  try:
+                      await client.connect()
+                  except: 
+                      time.sleep(3)
+                      try: await client.connect()
+                      except: pass
+
+          with client:
+              client.loop.run_until_complete(main())
+          PY
